@@ -140,13 +140,78 @@ class Interpolator1DMonotoneConvex(Interpolator1D):
                  extrapolation_method: ExtrapMethod) -> None:
         super().__init__(axis1, values, InterpMethod.MONOTONE_CONVEX,
                          extrapolation_method)
-        # TODO: Prepare your interpolation method.
+        assert self.extrap_method_ == ExtrapMethod.FLAT
+        x = np.asarray(axis1, dtype=float)
+        y = np.asarray(values, dtype=float)
+        n = len(x)
+
+        # Each piece is f(t) = c0 + c1 (t - start) + c2 (t - start)^2.
+        self.starts_, self.ends_, self.coefs_ = [], [], []
+        if n < 2:
+            return
+
+        h = np.diff(x)
+        d = np.diff(y) / h
+        m = np.full(n, d[0])
+        for i in range(1, n - 1):
+            if d[i - 1] * d[i] > 0:
+                m[i] = (h[i] * d[i - 1] + h[i - 1] * d[i]) / (h[i - 1] + h[i])
+            else:
+                m[i] = 0.0
+        # A zero end slope joins the flat extrapolation smoothly; it is only
+        # allowed at the start of a rising curve or the end of a falling one.
+        m[0] = 0.0 if d[0] >= 0 else 2 * d[0] - m[1]
+        m[-1] = 0.0 if d[-1] <= 0 else 2 * d[-1] - m[-2]
+
+        for i in range(n - 1):
+            # Slope must rise across the interval (convex) and keep one sign
+            # (monotone). Only non-convex data gets clipped, leaving a kink.
+            if d[i] >= 0:
+                s0, s1 = min(max(m[i], 0.0), d[i]), max(m[i + 1], d[i])
+            else:
+                s0, s1 = min(m[i], d[i]), min(max(m[i + 1], d[i]), 0.0)
+            a, b = d[i] - s0, s1 - d[i]
+            # Slope goes s0 -> d[i] -> s1; this knot makes the piece end at y[i + 1].
+            knot = h[i] * b / (a + b) if a + b > 0 else h[i]
+            if knot > 0:
+                self._add_piece(x[i], x[i] + knot, y[i], s0, a / (2 * knot))
+            if knot < h[i]:
+                y_knot = y[i] + knot * (s0 + d[i]) / 2
+                self._add_piece(x[i] + knot, x[i + 1], y_knot, d[i],
+                                b / (2 * (h[i] - knot)))
+        self.starts_ = np.array(self.starts_)
+        self.ends_ = np.array(self.ends_)
+        self.coefs_ = np.array(self.coefs_)
+
+    def _add_piece(self, start, end, c0, c1, c2):
+        self.starts_.append(start)
+        self.ends_.append(end)
+        self.coefs_.append((c0, c1, c2))
 
     def interpolate(self, x: float) -> float:
-        raise NotImplementedError("HW7: implement interpolate")
+        if x <= self.axis1_[0]:
+            return float(self.values_[0])
+        if x >= self.axis1_[-1]:
+            return float(self.values_[-1])
+        k = int(np.searchsorted(self.starts_, x, side='right')) - 1
+        c0, c1, c2 = self.coefs_[k]
+        u = x - self.starts_[k]
+        return float(c0 + c1 * u + c2 * u * u)
 
     def integrate(self, start_x: float, end_x: float) -> float:
-        raise NotImplementedError("HW7: implement integrate")
+        if end_x < start_x:
+            return -self.integrate(end_x, start_x)
+        first, last = float(self.axis1_[0]), float(self.axis1_[-1])
+        total = self.values_[0] * max(min(end_x, first) - start_x, 0.0)
+        total += self.values_[-1] * max(end_x - max(start_x, last), 0.0)
+        if len(self.starts_) == 0:
+            return float(total)
+        lo = np.clip(start_x, self.starts_, self.ends_) - self.starts_
+        hi = np.clip(end_x, self.starts_, self.ends_) - self.starts_
+        c0, c1, c2 = self.coefs_.T
+        total += np.sum(c0 * (hi - lo) + c1 * (hi**2 - lo**2) / 2
+                        + c2 * (hi**3 - lo**3) / 3)
+        return float(total)
 
     # Optional risk interface
     # The test cells for risk are not prepared but you can do it by your own.
